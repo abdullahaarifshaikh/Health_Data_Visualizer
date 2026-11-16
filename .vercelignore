@@ -1,0 +1,12 @@
+.env
+.env.*
+.venv
+.python
+.uv-cache
+.cache
+artifacts
+exports
+logs
+tests
+requirements.lock.txt
+.server.pid

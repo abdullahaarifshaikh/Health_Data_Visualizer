@@ -1,0 +1,5 @@
+{
+  "dependencies": ["."],
+  "graphs": {"healthlens": "./core/workflow.py:graph"},
+  "env": ".env"
+}

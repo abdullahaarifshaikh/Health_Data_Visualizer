@@ -1,0 +1,193 @@
+import io
+import os
+import secrets
+import threading
+import time
+from pathlib import Path
+
+import pandas as pd
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request, session
+from werkzeug.exceptions import HTTPException
+
+load_dotenv()
+os.environ.setdefault('SCARF_NO_ANALYTICS', 'true')
+os.environ.setdefault('MPLBACKEND', 'Agg')
+os.environ.setdefault('LITELLM_LOCAL_MODEL_COST_MAP', 'True')
+os.environ.setdefault('TIKTOKEN_CACHE_DIR', str(Path(__file__).parent / '.cache' / 'tiktoken'))
+from core.workflow import graph, profile_frame
+
+app = Flask(__name__, static_folder='static', static_url_path='/static')
+app.secret_key = os.getenv('SESSION_SECRET') or secrets.token_bytes(32)
+app.config.update(MAX_CONTENT_LENGTH=10 * 1024 * 1024, SESSION_COOKIE_HTTPONLY=True,
+                  SESSION_COOKIE_SAMESITE='Strict', SESSION_COOKIE_SECURE=bool(os.getenv('APP_PROXY_SECRET')))
+datasets = {}
+store_lock = threading.Lock()
+TTL = 7200
+
+
+@app.before_request
+def local_requests():
+    proxy_secret = os.getenv('APP_PROXY_SECRET')
+    if proxy_secret:
+        supplied = request.headers.get('X-HealthLens-Proxy', '')
+        if not secrets.compare_digest(supplied, proxy_secret):
+            return jsonify(error='Use the HealthLens website to access this service.'), 403
+        return None
+    if request.host.split(':')[0] not in ('127.0.0.1', 'localhost'):
+        return jsonify(error='Use localhost to open this app.'), 403
+    if request.method == 'POST':
+        origin = request.headers.get('Origin')
+        if origin and origin != request.host_url.rstrip('/'):
+            return jsonify(error='Cross-origin requests are not allowed.'), 403
+
+
+def owner():
+    if 'owner' not in session:
+        session['owner'] = secrets.token_urlsafe(24)
+    return session['owner']
+
+
+def get_dataset():
+    with store_lock:
+        now = time.time()
+        for key in list(datasets):
+            if now - datasets[key]['updated'] > TTL:
+                del datasets[key]
+        data = datasets.get(session.get('dataset'))
+        if data and data['owner'] == owner():
+            data['updated'] = now
+            return data
+    return None
+
+
+def save_dataset(frame, name):
+    frame.columns = [str(c).strip() for c in frame.columns]
+    if frame.empty:
+        raise ValueError('The file has no data rows.')
+    if frame.columns.duplicated().any():
+        raise ValueError('Column names must be unique after trimming spaces.')
+    if len(frame) > 100000 or len(frame.columns) > 150:
+        raise ValueError('Use up to 100,000 rows and 150 columns.')
+    token = secrets.token_urlsafe(24)
+    with store_lock:
+        datasets.pop(session.get('dataset'), None)
+        if len(datasets) >= 8:
+            del datasets[min(datasets, key=lambda k: datasets[k]['updated'])]
+        datasets[token] = {'frame': frame, 'name': name, 'history': [], 'owner': owner(),
+                           'updated': time.time(), 'lock': threading.Lock()}
+    session['dataset'] = token
+    return dataset_payload(datasets[token])
+
+
+def dataset_payload(data):
+    import json
+    frame = data['frame']
+    numeric = [str(c) for c in frame.select_dtypes(include='number').columns if not str(c).lower().endswith('_id')]
+    suggestions = ['Which columns have missing values?', 'Summarize this dataset for a student.']
+    if numeric:
+        suggestions = [f'Plot a histogram of {numeric[0]}.', f'What is the average {numeric[0]}?'] + suggestions
+    return {'name': data['name'], 'profile': profile_frame(frame),
+            'preview': json.loads(frame.head(12).to_json(orient='values', date_format='iso')),
+            'columns': list(frame.columns), 'suggestions': suggestions}
+
+
+@app.get('/')
+def index():
+    return app.send_static_file('index.html')
+
+
+@app.get('/api/status')
+def status():
+    import importlib.util
+    return jsonify(model=os.getenv('GEMINI_MODEL', 'gemini-3.6-flash'),
+                   configured=bool(os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')),
+                   pandasai_installed=importlib.util.find_spec('pandasai') is not None)
+
+
+@app.get('/api/dataset')
+def current_dataset():
+    data = get_dataset()
+    return jsonify(dataset_payload(data) if data else {})
+
+
+@app.post('/api/upload')
+def upload():
+    file = request.files.get('file')
+    if not file or not file.filename:
+        return jsonify(error='Choose a CSV or Excel file.'), 400
+    suffix = Path(file.filename).suffix.lower()
+    try:
+        if suffix == '.csv':
+            frame = pd.read_csv(file, nrows=100001)
+        elif suffix == '.xlsx':
+            import zipfile
+            raw = file.read()
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                if sum(i.file_size for i in archive.infolist()) > 100 * 1024 * 1024:
+                    raise ValueError('This workbook expands beyond the supported size.')
+            frame = pd.read_excel(io.BytesIO(raw), nrows=100001)
+        else:
+            return jsonify(error='Supported files: .csv and .xlsx. Excel loads the first worksheet.'), 400
+        return jsonify(save_dataset(frame, Path(file.filename).name))
+    except ValueError as exc:
+        return jsonify(error=str(exc)[:250]), 400
+    except Exception:
+        return jsonify(error='Unable to read this file. Check its format and headers.'), 400
+
+
+@app.post('/api/sample')
+def sample():
+    import random
+    rng = random.Random(42)
+    rows = []
+    for i in range(180):
+        age = rng.randint(18, 80)
+        rows.append({'record_id': f'S{i+1:03}', 'age_years': age,
+                     'group': rng.choice(['Class A', 'Class B', 'Class C']),
+                     'heart_rate_bpm': rng.randint(55, 105),
+                     'systolic_bp_mmhg': round(100 + age * .35 + rng.gauss(0, 12)),
+                     'sleep_hours': round(rng.uniform(4.5, 9), 1) if i % 13 else None})
+    return jsonify(save_dataset(pd.DataFrame(rows), 'Synthetic classroom data'))
+
+
+@app.post('/api/chat')
+def chat():
+    data = get_dataset()
+    if not data:
+        return jsonify(error='Upload a dataset first.'), 400
+    body = request.get_json(silent=True) or {}
+    question = body.get('question', '')
+    if not isinstance(question, str) or not question.strip() or len(question) > 4000:
+        return jsonify(error='Enter a question between 1 and 4,000 characters.'), 400
+    if not data['lock'].acquire(blocking=False):
+        return jsonify(error='An analysis is already running for this dataset.'), 409
+    try:
+        state = graph.invoke({'frame': data['frame'], 'question': question, 'history': data['history']})
+        if state.get('error'):
+            return jsonify(error=state['error'], trace=state['trace']), 422
+        result = state['result']
+        data['history'] = (data['history'] + [{'question': question, 'answer': result.get('answer', '')[:1500]}])[-6:]
+        return jsonify(result=result, trace=state['trace'])
+    finally:
+        data['lock'].release()
+
+
+@app.post('/api/clear')
+def clear():
+    with store_lock:
+        datasets.pop(session.get('dataset'), None)
+    session.pop('dataset', None)
+    return jsonify(ok=True)
+
+
+@app.errorhandler(Exception)
+def handle_error(exc):
+    if isinstance(exc, HTTPException):
+        return jsonify(error='File exceeds the 10 MB limit.' if exc.code == 413 else exc.description), exc.code
+    app.logger.warning('Request failed: %s', type(exc).__name__)
+    return jsonify(error='Unable to complete the request. Please try again.'), 500
+
+
+if __name__ == '__main__':
+    app.run(host=os.getenv('HOST', '127.0.0.1'), port=int(os.getenv('PORT', '5000')), debug=False)
