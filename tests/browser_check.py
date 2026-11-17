@@ -30,7 +30,10 @@ class BrowserModel:
         if isinstance(last, HumanMessage) and 'pie' in last.content.lower():
             return AIMessage(content='', tool_calls=[{'name': 'explain_distribution', 'args': {'column': 'age_years', 'chart_type': 'pie'}, 'id': 'pie-test'}])
         return AIMessage(content='In simpler terms, we are checking whether two recorded measurements move together. '
-                         'The previous correlation describes the observed pattern; it does not establish cause.')
+                         'The previous correlation describes the observed pattern; it does not establish cause.\n\n'
+                         '| Topic | How I will answer it |\n| --- | --- |\n'
+                         '| Relationships between two measurements | ' + 'A long explanation about recorded measurements and calculated associations. ' * 12 + '|\n'
+                         '| Column name | ' + 'very_long_column_name_' * 30 + ' |')
 
 
 web.graph = build_graph(BrowserModel())
@@ -64,6 +67,14 @@ with sync_playwright() as p:
     page.get_by_role('button', name='Explain that more simply.', exact=True).click()
     page.wait_for_function("document.querySelectorAll('.lesson-text').length === 2")
     assert 'previous correlation' in page.locator('.lesson-text').last.inner_text()
+    assert page.locator('.markdown-table').count() == 1
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+    page.set_viewport_size({'width': 390, 'height': 844})
+    page.wait_for_function('document.documentElement.scrollWidth <= window.innerWidth')
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+    assert page.locator('.markdown-table').evaluate('el => el.getBoundingClientRect().right <= innerWidth')
+    page.screenshot(path=str(out / 'table-overflow-mobile.png'), full_page=True)
+    page.set_viewport_size({'width': 1440, 'height': 1050})
     page.reload(wait_until='networkidle')
     assert page.locator('.lesson-text').count() == 2
     page.locator('#question').fill('Make a pie chart for age and explain it.')

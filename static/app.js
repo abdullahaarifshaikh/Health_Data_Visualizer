@@ -26,6 +26,10 @@ function markdown(text) {
       ALLOWED_ATTR: ['href', 'title']
     });
     node.querySelectorAll('a').forEach(a => { a.target = '_blank'; a.rel = 'noopener noreferrer'; });
+    node.querySelectorAll('table').forEach(grid => {
+      const wrap = el('div', undefined, 'table-wrap markdown-table');
+      grid.replaceWith(wrap); wrap.append(grid);
+    });
   } else node.textContent = text;
   return node;
 }
