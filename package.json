@@ -2,8 +2,8 @@
   "name": "healthlens",
   "private": true,
   "type": "module",
-  "scripts": {"build": "node scripts/build-web.mjs"},
-  "dependencies": {"@vercel/sandbox": "^3.0.0"},
+  "scripts": {"assets": "node scripts/build-vendor.mjs", "build": "npm run assets && node scripts/build-web.mjs"},
+  "dependencies": {"@vercel/sandbox": "^3.0.0", "echarts": "^6.0.0", "marked": "^17.0.0", "dompurify": "^3.3.0"},
   "overrides": {"@vercel/cli-config": {"zod": "^4.6.6"}},
   "engines": {"node": "22.x"}
 }

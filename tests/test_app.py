@@ -9,7 +9,7 @@ from PIL import Image
 
 import app as web
 from core.analysis import SetupError, normalize_response
-from core.workflow import build_graph
+from core.pandasai_workflow import build_graph
 from core.query import query_frames
 from core.errors import redact_error, describe_failure
 
@@ -31,7 +31,7 @@ class WorkflowTests(unittest.TestCase):
             pass
         with self.assertLogs('core.errors', level='WARNING'):
             message = describe_failure(Timeout('request timed out'))
-        self.assertIn('Gemini did not respond in time', message)
+        self.assertIn('did not respond in time', message)
         self.assertIn('Error reference:', message)
 
     def test_sql_callback_computes_and_blocks_external_access(self):
@@ -109,10 +109,11 @@ class AppTests(unittest.TestCase):
 
     def test_missing_key_is_actionable(self):
         self.client.post('/api/sample')
-        with patch.dict(os.environ, {'GOOGLE_API_KEY': '', 'GEMINI_API_KEY': ''}):
+        with patch.dict(os.environ, {'GOOGLE_API_KEY': '', 'GEMINI_API_KEY': '', 'GROQ_API_KEY': ''}):
             response = self.client.post('/api/chat', json={'question': 'Average age?'})
-        self.assertEqual(response.status_code, 422)
-        self.assertIn('GOOGLE_API_KEY', response.get_json()['error'])
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()['result']['partial'])
+        self.assertIn('couldn’t reach the tutor', response.get_json()['result']['answer'])
 
     def test_chat_uses_graph_and_tracks_followup(self):
         backend = Backend()

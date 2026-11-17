@@ -1,75 +1,86 @@
 # HealthLens
 
-A local teaching app for exploring tabular healthcare datasets with **LangGraph + PandasAI + Gemini 3.6 Flash**. Upload CSV/XLSX, inspect a data profile, ask questions, and download Matplotlib charts or result tables. Includes invented classroom data to explore without an upload.
+A conversational teacher for tabular healthcare data. Upload CSV/XLSX, ask a question, learn from an explanation backed by computed evidence and an interactive ECharts visualization, then ask a follow-up.
 
-## Hosted deployment
+## Architecture
 
-The Vercel website serves static assets and a Node API gateway. The Python LangGraph/PandasAI app runs in a persistent Vercel Sandbox with its own Docker engine. The gateway authenticates to that project using Vercel OIDC; backend access requires a server-only proxy secret. Gemini credentials are stored as Vercel secrets, never in GitHub or browser code.
+The primary path is **LangChain tools + LangGraph + a selectable Groq/Gemini chat model**. PandasAI is retained as an optional backend; it does not handle the default educational conversation.
 
-The hosted upload limit is 4 MB. A cold backend resumes its saved filesystem and restarts its services; in-memory datasets must be uploaded again after that restart. Hobby sandbox sessions last up to 45 minutes and resume on demand, within account quotas. The deployment snapshot contains Python dependencies and the analysis image, but no uploaded datasets. Future backend changes require updating the sandbox source and saving a fresh snapshot as well as deploying the website.
+```mermaid
+graph LR
+  START --> understand_question
+  understand_question -->|clear relationship or distribution| calculate_evidence
+  understand_question -->|other question| tutor
+  tutor -->|tool calls| calculate_evidence
+  calculate_evidence --> tutor
+  tutor -->|answer or failure| verify_explanation
+  verify_explanation --> respond --> END
+```
 
-Build the website with `npm ci` and `npm run build`. `cloud/start.sh` starts the backend after a sandbox resume. `cloud/PandasAI.Dockerfile` builds the execution image in the cloud. Configure `GOOGLE_API_KEY`, `GEMINI_MODEL`, `APP_PROXY_SECRET`, `SESSION_SECRET`, and `HEALTHLENS_SANDBOX_NAME` as server-side Vercel environment variables.
+- `core/education.py`: shared conversation state, bounded tool rounds, teaching prompt, evidence checks and graceful fallback.
+- `core/teaching_tools.py`: typed LangChain tools; ToolRuntime injects the dataset and ToolNode executes requests.
+- `core/analytics.py`: deterministic relationship statistics, missing-value handling, distributions, comparisons and chart data.
+- `core/models.py`: provider/model selection. Default hosted configuration is Groq GPT-OSS 120B; Gemini remains selectable.
+- `core/grounding.py`: conservative checks for known unsupported claims, such as treating correlation as a per-hour effect. This is not a comprehensive factual validator.
+- `core/query.py`: read-only DuckDB queries against the in-memory table `healthcare`, with external access disabled, a memory limit and a query deadline.
+- `static/charts.js`: interactive ECharts built from calculated data, with tooltips, zoom and image download. No model-generated plotting code is executed on this path.
+- `core/pandasai_workflow.py` and `core/analysis.py`: retained optional PandasAI/Docker path.
 
-## Run
+Plain, unfiltered relationships and distribution requests can go directly to a calculation tool, followed by one explanatory model call. Other questions use a model → tools → explanation flow. At most two tool rounds and three model calls are allowed. Provider retries are disabled and individual model requests are bounded. If the model fails after a calculation, the evidence and chart remain available with a calculation-based explanation. Certain failed grounding checks also use this explicit fallback.
 
-Use Python **3.11**. PandasAI 3.0.0 constrains older scientific packages; the project environment keeps these separate from your system Python.
+Conversation history includes the previous questions, answers and tool evidence, scoped to the browser's dataset. Four turns are retained and restored on refresh. This is in-memory conversational state, not a durable LangGraph checkpoint. Progress updates stream to the browser as NDJSON.
+
+## Run locally
+
+Use Python 3.11 while the optional PandasAI dependency remains installed.
 
 ```powershell
 uv venv --python 3.11 .venv
 uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+npm ci
+npm run assets
 Copy-Item .env.example .env
-# Edit .env and set GOOGLE_API_KEY
+# Set GROQ_API_KEY, or choose LLM_PROVIDER=gemini and set GOOGLE_API_KEY
 .\start.ps1
 ```
 
-Open http://127.0.0.1:5000. Start Docker Desktop with its Linux engine before asking an AI question. The first question may download PandasAI's execution image. No API key is required for uploads, previews, or the sample dataset. API keys stay on the server; never put one in frontend code or commit .env.
+Open http://127.0.0.1:5000. The default educational path does not require Docker. Select `ANALYSIS_BACKEND=pandasai` only to use the retained legacy backend, which requires Docker Desktop's Linux engine and the Gemini configuration used by its adapter. Never commit API keys or put them in browser code.
 
-## Workflow
+## Hosted deployment
 
-```mermaid
-graph LR
-  START --> profile_data --> validate_request
-  validate_request -->|valid| pandasai_analysis
-  validate_request -->|invalid| END
-  pandasai_analysis -->|success| format_result
-  pandasai_analysis -->|failure| END
-  format_result --> teaching_context --> END
-```
+Vercel serves the website and Node gateway. The Python backend runs in a persistent Vercel Sandbox. The gateway authenticates using Vercel OIDC and protects the backend with a server-only proxy secret. Keys stay in Vercel secret settings. The current sandbox name is `healthlens-education`.
 
-`core/workflow.py` defines typed shared state and individually replaceable nodes. `build_graph(backend=...)` accepts any backend implementing `analyze(frame, question, history)`. `core/analysis.py` is the PandasAI adapter, configures Gemini through LiteLLM, and runs generated code in PandasAI's DockerSandbox. There is no direct generated-code execution fallback.
+Configure `LLM_PROVIDER`, `GROQ_API_KEY`, `GROQ_MODEL`, `GOOGLE_API_KEY`, `GEMINI_MODEL`, `APP_PROXY_SECRET`, `SESSION_SECRET`, and `HEALTHLENS_SANDBOX_NAME` on the server as appropriate. Changing `LLM_PROVIDER` and the corresponding model setting switches the chat provider without changing the graph.
 
-PandasAI currently owns its internal code-generation and retry loop. LangGraph owns the surrounding application workflow. To split generation/execution into graph nodes later, extend the backend interface instead of changing the web UI. History is scoped to a dataset in a browser session and reconstructed into each request; it is not a durable LangGraph checkpoint. `langgraph.json` exposes the graph for development tooling (install langgraph-cli separately if needed).
+Hobby sandbox sessions last up to 45 minutes and resume on demand within account quotas. Cold resumes restart the Python service; in-memory uploads and history must then be loaded again. The deployment snapshot includes dependencies but not live process memory. Python changes require uploading the allowlisted backend source and saving a fresh snapshot; pushing a website-only change deploys it through GitHub automatically. `cloud/start.sh` checks the deployment revision before starting the backend.
 
-## Scope and limitations
+## Scope and limits
 
-- Descriptive education and exploration. AI results require review; prompts are guidance, not a guarantee of correctness or medical scope.
-- CSV and XLSX only; Excel uses the first worksheet. Maximum 10 MB, 100,000 rows, 150 columns.
-- Uploaded data stays in server memory for up to two hours of inactivity, is replaced on new upload, and disappears on restart. Maximum eight active datasets. PandasAI may write local logs/artifacts; do not use this prototype for confidential records.
-- Model requests may include table metadata/sample data. Use public or synthetic teaching data with the free Gemini tier.
-- Matplotlib charts are static PNGs. Table previews/exports include at most 200 result rows.
-- Docker must be running; generated analysis is never executed directly on the host.
-- This is a localhost prototype, not a multi-user deployment. The browser UI and fonts run locally.
-- Live Gemini 3.6 Flash testing passed on 15 November 2026 with synthetic data: the mean age matched the direct calculation, and the full workflow produced a labeled Matplotlib histogram. Model availability and quotas depend on your Google project.
+- Education and descriptive exploration, not treatment decisions. Model prose still requires review; evidence checks are not a guarantee of correctness.
+- CSV/XLSX, first Excel worksheet, up to 100,000 rows and 150 columns. File limit: 10 MB locally, 4 MB hosted.
+- Missing/nonfinite pairs are excluded explicitly; no automatic imputation. Relationship plots show at most 2,000 points, with statistics computed over all complete pairs.
+- Numeric pie charts use labeled equal-width bins, not clinical thresholds. Table previews/exports include at most 200 rows.
+- Maximum eight active in-memory datasets; two-hour inactivity expiry. New uploads clear that browser's prior conversation. Restarting the service clears uploads and conversation.
+- Model requests include schema and computed summaries; query result previews may include dataset values. Use public or synthetic teaching datasets for this prototype.
+- Groq and Gemini both have request/token quotas. One question can require multiple model requests; no automatic paid-provider fallback is configured.
 
 ## Verify
 
 ```powershell
 .venv\Scripts\python.exe -m unittest discover -s tests -v
-node --check static/app.js
+.venv\Scripts\python.exe tests\browser_check.py
+# Opt-in live API test, using synthetic data:
+.venv\Scripts\python.exe tests\live_education.py
 ```
 
-Tests exercise the real LangGraph routing with an injected backend, file uploads, missing-value preservation, chart response normalization, browser-session isolation, history, and missing-key handling. They do not pretend to validate live model output.
+Tests cover the exact heart-rate/sleep relationship question, follow-up state, counted age pies, missing/nonfinite data, bounded tool loops, timeout fallbacks, grounding failures, uploads, isolation and streaming. Browser tests use a simulated model with real calculations and check interactive scatter/pie charts, refresh memory, sanitized Markdown and mobile layout. The retained PandasAI adapter has its own mocked-provider contract test. Live tests are explicitly separate from deterministic tests.
 
-An additional contract test uses the actual installed PandasAI Agent and LiteLLM adapter with a simulated provider response and execution container. It checks the generated-code handoff and real restricted SQL calculation. `tests/browser_check.py` runs a temporary local server and checks desktop/mobile layouts using Playwright (optional development dependency).
+## Documentation consulted
 
-`requirements.lock.txt` records the verified Windows/Python 3.11 environment, including optional browser-check dependencies. Use it to reproduce the installed versions. The shorter `requirements.txt` lists application dependencies.
-
-## Documentation checked
-
-- [LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)
-- [PandasAI Agent and sandbox](https://docs.pandas-ai.com/v3/agent)
-- [PandasAI LiteLLM configuration](https://docs.pandas-ai.com/v3/large-language-models)
-- [PandasAI source and Python requirements](https://github.com/sinaptik-ai/pandas-ai)
-- [Gemini API pricing and model IDs](https://ai.google.dev/gemini-api/docs/pricing)
-
-PandasAI core is MIT licensed; enterprise directories use separate terms. This project uses its core Agent and Docker integration.
+- [LangGraph quickstart](https://docs.langchain.com/oss/python/langgraph/quickstart)
+- [LangChain tools and ToolRuntime](https://docs.langchain.com/oss/python/langchain/tools)
+- [LangChain Groq integration](https://docs.langchain.com/oss/python/integrations/chat/groq)
+- [LangChain Gemini integration](https://docs.langchain.com/oss/python/integrations/chat/google_generative_ai)
+- [Groq models](https://console.groq.com/docs/models) and [limits](https://console.groq.com/docs/rate-limits)
+- [PandasAI Agent](https://docs.pandas-ai.com/v3/agent)
+- [Vercel Sandbox](https://vercel.com/docs/sandbox)

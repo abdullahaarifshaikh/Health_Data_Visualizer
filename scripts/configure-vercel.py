@@ -13,7 +13,7 @@ if not key:
     raise SystemExit('No local Gemini key configured.')
 variables = {'GOOGLE_API_KEY': key, 'GEMINI_MODEL': values.get('GEMINI_MODEL', 'gemini-3.6-flash'),
              'APP_PROXY_SECRET': secrets.token_urlsafe(48), 'SESSION_SECRET': secrets.token_urlsafe(48),
-             'HEALTHLENS_SANDBOX_NAME': 'healthlens-backend'}
+             'HEALTHLENS_SANDBOX_NAME': 'healthlens-education'}
 cli = shutil.which('vercel.cmd') or shutil.which('vercel')
 for name, value in variables.items():
     result = subprocess.run([cli, 'env', 'add', name, '--environment', 'production,preview',

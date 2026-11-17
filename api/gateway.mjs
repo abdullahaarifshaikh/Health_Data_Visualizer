@@ -1,4 +1,5 @@
 import {Sandbox} from '@vercel/sandbox';
+import {Readable} from 'node:stream';
 
 export const config = {api: {bodyParser: false}};
 const routes = new Set(['status', 'dataset', 'sample', 'upload', 'chat', 'clear']);
@@ -17,8 +18,13 @@ async function backend() {
       env: {
         GOOGLE_API_KEY: process.env.GOOGLE_API_KEY || '',
         GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-3.6-flash',
+        GROQ_API_KEY: process.env.GROQ_API_KEY || '',
+        GROQ_MODEL: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
+        LLM_PROVIDER: process.env.LLM_PROVIDER || 'gemini',
         APP_PROXY_SECRET: process.env.APP_PROXY_SECRET,
         SESSION_SECRET: process.env.SESSION_SECRET,
+        HEALTHLENS_REVISION: process.env.VERCEL_GIT_COMMIT_SHA || 'education-v2',
+        ANALYSIS_BACKEND: process.env.ANALYSIS_BACKEND || 'education',
         HOST: '0.0.0.0', PORT: '5000', PYTHONUTF8: '1'
       }, timeoutMs: 100_000
     });
@@ -42,6 +48,7 @@ export default async function handler(req, res) {
     const headers = {'X-HealthLens-Proxy': process.env.APP_PROXY_SECRET};
     if (req.headers.cookie) headers.cookie = req.headers.cookie;
     if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
+    if (req.headers.accept) headers.accept = req.headers.accept;
     const chunks = [];
     let bytes = 0;
     for await (const chunk of req) {
@@ -57,7 +64,11 @@ export default async function handler(req, res) {
     res.setHeader('Content-Type', response.headers.get('content-type') || 'application/json');
     res.setHeader('Cache-Control', 'no-store');
     for (const cookie of response.headers.getSetCookie()) res.appendHeader('Set-Cookie', cookie);
-    res.end(Buffer.from(await response.arrayBuffer()));
+    if (response.body) {
+      const stream = Readable.fromWeb(response.body);
+      stream.on('error', () => res.destroy());
+      stream.pipe(res);
+    } else res.end();
   } catch (error) {
     console.error('HealthLens gateway:', error.name, error.message === 'Backend startup failed' ? error.message : 'upstream request failed');
     res.status(503).json({error: 'The analysis service is waking up or temporarily unavailable. Retry shortly.'});

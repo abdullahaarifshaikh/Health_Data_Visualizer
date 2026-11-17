@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, session
+from flask import Flask, Response, jsonify, request, session, stream_with_context
 from werkzeug.exceptions import HTTPException
 
 load_dotenv()
@@ -74,7 +74,7 @@ def save_dataset(frame, name):
         datasets.pop(session.get('dataset'), None)
         if len(datasets) >= 8:
             del datasets[min(datasets, key=lambda k: datasets[k]['updated'])]
-        datasets[token] = {'frame': frame, 'name': name, 'history': [], 'owner': owner(),
+        datasets[token] = {'frame': frame, 'name': name, 'history': [], 'turns': [], 'responses': [], 'owner': owner(),
                            'updated': time.time(), 'lock': threading.Lock()}
     session['dataset'] = token
     return dataset_payload(datasets[token])
@@ -84,12 +84,15 @@ def dataset_payload(data):
     import json
     frame = data['frame']
     numeric = [str(c) for c in frame.select_dtypes(include='number').columns if not str(c).lower().endswith('_id')]
-    suggestions = ['Which columns have missing values?', 'Summarize this dataset for a student.']
+    suggestions = ['Help me understand this dataset.', 'What do the missing values mean for this analysis?']
     if numeric:
-        suggestions = [f'Plot a histogram of {numeric[0]}.', f'What is the average {numeric[0]}?'] + suggestions
+        pair = ['heart_rate_bpm', 'sleep_hours'] if all(c in numeric for c in ['heart_rate_bpm', 'sleep_hours']) else numeric[:2]
+        if len(pair) == 2:
+            suggestions.insert(0, f'How are {pair[0].replace("_", " ")} and {pair[1].replace("_", " ")} related?')
+        suggestions.append(f'Explain the distribution of {numeric[0]}.')
     return {'name': data['name'], 'profile': profile_frame(frame),
             'preview': json.loads(frame.head(12).to_json(orient='values', date_format='iso')),
-            'columns': list(frame.columns), 'suggestions': suggestions}
+            'columns': list(frame.columns), 'suggestions': suggestions, 'conversation': data['responses']}
 
 
 @app.get('/')
@@ -100,8 +103,9 @@ def index():
 @app.get('/api/status')
 def status():
     import importlib.util
-    return jsonify(model=os.getenv('GEMINI_MODEL', 'gemini-3.6-flash'),
-                   configured=bool(os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')),
+    from core.models import model_name, provider_name, configured
+    return jsonify(model=model_name(), provider=provider_name(), configured=configured(),
+                   engine=os.getenv('ANALYSIS_BACKEND', 'education'),
                    pandasai_installed=importlib.util.find_spec('pandasai') is not None)
 
 
@@ -162,12 +166,52 @@ def chat():
         return jsonify(error='Enter a question between 1 and 4,000 characters.'), 400
     if not data['lock'].acquire(blocking=False):
         return jsonify(error='An analysis is already running for this dataset.'), 409
+    previous = [message for turn in data['turns'][-4:] for message in turn]
+    inputs = {'frame': data['frame'], 'question': question, 'history': data['history'], 'messages': previous}
+
+    def remember(state):
+        result = state['result']
+        data['responses'] = (data['responses'] + [{'question': question, 'result': result, 'trace': state.get('trace', [])}])[-4:]
+        data['history'] = (data['history'] + [{'question': question, 'answer': result.get('answer', '')}])[-4:]
+        if state.get('messages'):
+            data['turns'] = (data['turns'] + [state['messages'][len(previous):]])[-4:]
+
+    if request.headers.get('Accept') == 'application/x-ndjson':
+        import json
+        labels = {'understand_question': 'Understanding your question', 'plan_response': 'Checking the data',
+                  'calculate_evidence': 'Explaining what the evidence means', 'explain_findings': 'Preparing your answer',
+                  'verify_explanation': 'Checking the explanation against the calculations', 'respond': 'Putting your lesson together'}
+
+        @stream_with_context
+        def events():
+            try:
+                yield json.dumps({'type': 'progress', 'message': 'Reading your question'}) + '\n'
+                last_step = None
+                state = None
+                for state in graph.stream(inputs, stream_mode='values'):
+                    trace = state.get('trace', [])
+                    step = trace[-1] if trace else None
+                    if step and step != last_step:
+                        yield json.dumps({'type': 'progress', 'message': labels.get(step, 'Working through your question')}) + '\n'
+                        last_step = step
+                if state is None or state.get('error'):
+                    yield json.dumps({'type': 'error', 'error': state.get('error') if state else 'Unable to start the tutor.'}) + '\n'
+                else:
+                    remember(state)
+                    yield json.dumps({'type': 'result', 'result': state['result'], 'trace': state['trace']}, allow_nan=False) + '\n'
+            except Exception as exc:
+                from core.errors import describe_failure
+                yield json.dumps({'type': 'error', 'error': describe_failure(exc)}) + '\n'
+            finally:
+                data['lock'].release()
+        return Response(events(), content_type='application/x-ndjson', headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
+
     try:
-        state = graph.invoke({'frame': data['frame'], 'question': question, 'history': data['history']})
+        state = graph.invoke(inputs)
         if state.get('error'):
             return jsonify(error=state['error'], trace=state['trace']), 422
         result = state['result']
-        data['history'] = (data['history'] + [{'question': question, 'answer': result.get('answer', '')[:1500]}])[-6:]
+        remember(state)
         return jsonify(result=result, trace=state['trace'])
     finally:
         data['lock'].release()
