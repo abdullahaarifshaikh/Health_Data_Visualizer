@@ -47,6 +47,11 @@ with sync_playwright() as p:
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto('http://127.0.0.1:5019', wait_until='domcontentloaded')
+    assert page.locator('#chat-form').bounding_box()['height'] <= 60
+    assert page.locator('.content').bounding_box()['width'] <= 816
+    page.locator('#question').fill('First line\nSecond line\nThird line\nFourth line')
+    assert page.locator('#question').bounding_box()['height'] > 70
+    page.locator('#question').fill('')
     page.get_by_role('button', name='Explore sample data').click()
     page.locator('#view-data').wait_for(state='visible')
     page.wait_for_function("!document.querySelector('#view-data').disabled")

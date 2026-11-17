@@ -241,6 +241,12 @@ $('#sidebar-toggle').onclick = () => collapseSidebar(!document.body.classList.co
 $('#question').onkeydown = event => {
   if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('#chat-form').requestSubmit(); }
 };
+function resizeComposer() {
+  const field = $('#question');
+  field.style.height = 'auto';
+  field.style.height = Math.min(field.scrollHeight, 160) + 'px';
+}
+$('#question').addEventListener('input', resizeComposer);
 $('#chat-form').onsubmit = async event => {
   event.preventDefault(); if (busy || !dataset) return;
   const question = $('#question').value.trim(); if (!question) return;
@@ -248,6 +254,7 @@ $('#chat-form').onsubmit = async event => {
   const turn = el('div', undefined, 'turn'); turn.append(el('div', question, 'user-message'));
   const card = el('div', undefined, 'response'), loading = el('div', 'Reading your question', 'response-label loading');
   card.append(loading); turn.append(card); $('#conversation').append(turn); $('#question').value = '';
+  resizeComposer();
   turn.scrollIntoView({behavior: 'smooth', block: 'nearest'});
   const started = Date.now(); let phase = 'Reading your question';
   const timer = setInterval(() => { loading.textContent = `${phase} · ${Math.floor((Date.now() - started) / 1000)}s`; }, 1000);
