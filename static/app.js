@@ -53,7 +53,10 @@ function showDataset(data) {
   dataset = data;
   $('#welcome').hidden = true; $('#overview').hidden = false;
   $('#dataset-name').textContent = data.name;
-  $('#dataset-caption').textContent = 'Ready for questions · stored in memory';
+  $('#dataset-title').textContent = data.name;
+  $('#view-data').disabled = false;
+  $('#clear').disabled = busy;
+  renderChats(data);
   $('#rows').textContent = data.profile.rows.toLocaleString();
   $('#cols').textContent = data.profile.column_count;
   $('#missing').textContent = data.profile.missing_cells.toLocaleString();
@@ -86,7 +89,8 @@ function questionButton(question) {
 
 function setBusy(value) {
   busy = value;
-  for (const selector of ['#upload-button', '#sample', '#clear']) $(selector).disabled = value;
+  for (const selector of ['#upload-button', '#sample', '#clear', '#new-chat']) $(selector).disabled = value || (selector !== '#upload-button' && selector !== '#sample' && !dataset);
+  document.querySelectorAll('#chat-list button').forEach(button => button.disabled = value);
   $('#send').disabled = value || !dataset;
   document.querySelectorAll('.suggestions button, .followups button').forEach(button => button.disabled = value);
   $('#composer-hint').textContent = value ? 'Working through your question…' : 'Ask a question or follow up · Enter to send';
@@ -199,8 +203,37 @@ $('#sample').onclick = async () => {
 };
 $('#clear').onclick = async () => {
   if (busy) return;
-  try { await api('/api/clear', {method: 'POST'}); location.reload(); } catch (error) { notice(error.message); }
+  await changeChat('clear');
 };
+async function changeChat(action, id) {
+  if (busy || !dataset) return;
+  setBusy(true);
+  try {
+    showDataset(await api('/api/chats', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action, id})}));
+    $('#question').value = ''; notice('');
+  } catch (error) { notice(error.message); }
+  finally { setBusy(false); }
+}
+function renderChats(data) {
+  $('#chat-list').replaceChildren();
+  for (const chat of data.chats || []) {
+    const button = el('button', chat.title, chat.id === data.active_chat ? 'chat-link selected' : 'chat-link');
+    button.title = chat.title; button.setAttribute('aria-current', chat.id === data.active_chat ? 'true' : 'false');
+    button.onclick = () => changeChat('select', chat.id); $('#chat-list').append(button);
+  }
+}
+$('#new-chat').onclick = () => changeChat('new');
+$('#view-data').onclick = () => $('#dataset-dialog').showModal();
+$('#close-data').onclick = () => $('#dataset-dialog').close();
+$('#dataset-dialog').onclick = event => { if (event.target === $('#dataset-dialog')) $('#dataset-dialog').close(); };
+function collapseSidebar(collapsed) {
+  document.body.classList.toggle('sidebar-collapsed', collapsed);
+  $('#sidebar-toggle').setAttribute('aria-expanded', String(!collapsed));
+  $('#sidebar').inert = collapsed;
+  requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+}
+collapseSidebar(window.innerWidth <= 720);
+$('#sidebar-toggle').onclick = () => collapseSidebar(!document.body.classList.contains('sidebar-collapsed'));
 $('#question').onkeydown = event => {
   if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('#chat-form').requestSubmit(); }
 };
@@ -217,6 +250,7 @@ $('#chat-form').onsubmit = async event => {
   try {
     const data = await ask(question, message => { phase = message; loading.textContent = message; });
     renderAnswer(card, data.result, data.trace);
+    const updated = await api('/api/dataset'); dataset = updated; renderChats(updated);
   } catch (error) {
     card.classList.add('error'); card.replaceChildren(el('div', 'LET’S TRY THAT AGAIN', 'response-label'), el('p', error.message));
     $('#question').value = question;

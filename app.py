@@ -90,9 +90,45 @@ def dataset_payload(data):
         if len(pair) == 2:
             suggestions.insert(0, f'How are {pair[0].replace("_", " ")} and {pair[1].replace("_", " ")} related?')
         suggestions.append(f'Explain the distribution of {numeric[0]}.')
+    chats = data.setdefault('chats', {})
+    active = data.setdefault('active_chat', secrets.token_urlsafe(12))
+    chats[active] = {k: data[k] for k in ('responses', 'history', 'turns')}
     return {'name': data['name'], 'profile': profile_frame(frame),
             'preview': json.loads(frame.head(12).to_json(orient='values', date_format='iso')),
-            'columns': list(frame.columns), 'suggestions': suggestions, 'conversation': data['responses']}
+            'columns': list(frame.columns), 'suggestions': suggestions, 'conversation': data['responses'],
+            'active_chat': active, 'chats': [{'id': key, 'title': value['responses'][0]['question'][:70] if value['responses'] else 'New chat'} for key, value in reversed(list(chats.items()))]}
+
+
+@app.post('/api/chats')
+def manage_chats():
+    data = get_dataset()
+    if not data:
+        return jsonify(error='Upload a dataset first.'), 400
+    if not data['lock'].acquire(blocking=False):
+        return jsonify(error='Wait for the current answer before changing chats.'), 409
+    try:
+        dataset_payload(data)
+        body = request.get_json(silent=True) or {}
+        action = body.get('action')
+        if action == 'select':
+            key = body.get('id')
+            if key not in data['chats']:
+                return jsonify(error='Chat not found.'), 404
+            data['active_chat'] = key
+            data.update(data['chats'][key])
+        elif action == 'clear':
+            data.update(responses=[], history=[], turns=[])
+        elif action == 'new':
+            if data['responses']:
+                data['active_chat'] = secrets.token_urlsafe(12)
+                data.update(responses=[], history=[], turns=[])
+                if len(data['chats']) >= 20:
+                    del data['chats'][next(iter(data['chats']))]
+        else:
+            return jsonify(error='Unknown chat action.'), 400
+        return jsonify(dataset_payload(data))
+    finally:
+        data['lock'].release()
 
 
 @app.get('/')

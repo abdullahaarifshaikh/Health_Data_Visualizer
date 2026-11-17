@@ -2,7 +2,7 @@ import {Sandbox} from '@vercel/sandbox';
 import {Readable} from 'node:stream';
 
 export const config = {api: {bodyParser: false}};
-const routes = new Set(['status', 'dataset', 'sample', 'upload', 'chat', 'clear']);
+const routes = new Set(['status', 'dataset', 'sample', 'upload', 'chat', 'clear', 'chats']);
 let ready;
 let readyUntil = 0;
 
