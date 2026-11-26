@@ -7,12 +7,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from werkzeug.serving import make_server
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 import app as web
-from core.education import build_graph
+from core.education import build_graph, unpack, prompt_context
 from playwright.sync_api import sync_playwright
 
 
 class BrowserModel:
-    def bind_tools(self, tools): return self
+    def bind_tools(self, tools, **kwargs): return self
     def invoke(self, messages):
         question = next(m.content for m in reversed(messages) if isinstance(m, HumanMessage))
         def call(name,args,id):
@@ -34,7 +34,11 @@ class BrowserModel:
         return AIMessage(content=json.dumps({'answer':'The previous correlation describes the observed pattern; it does not establish cause.\n\n| Topic | Explanation |\n| --- | --- |\n| Measurements | '+'A long explanation about recorded measurements. '*12+'|\n| Column | '+'very_long_column_name_'*30+' |', 'followups':['How many sleep hours values are missing?']}))
 
 
-web.graph = build_graph(BrowserModel())
+def browser_plan(state):
+    chart = any(word in state['question'].lower() for word in ('relationship', 'pie', 'matrix'))
+    return {'intent':'chart' if chart else 'concept','goal':state['question'],'steps':[],'requires_calculation':False,'requires_chart':chart}
+browser_model = BrowserModel()
+web.graph = build_graph(browser_model, planner=browser_plan, finalizer=lambda state,payload: dict(zip(("answer","followups"),unpack(browser_model.invoke(prompt_context(state)[0])))))
 out = Path('artifacts')
 out.mkdir(exist_ok=True)
 server = make_server('127.0.0.1', 5019, web.app, threaded=True)

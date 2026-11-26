@@ -5,16 +5,23 @@ import unittest
 from unittest.mock import patch
 import numpy as np
 import pandas as pd
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage
 import app as web
 from core.analytics import relationship, distribution, direct_relationship
-from core.education import build_graph, prompt_context
+from core.education import build_graph, prompt_context, unpack
+
+def test_plan(state):
+    question = state["question"].lower()
+    chart = any(word in question for word in ("relates", "relationship", "compare all three", "chart", "matrix"))
+    calculation = chart or any(word in question for word in ("mean", "average", "summarize", "table"))
+    return {"intent":"relationship" if chart else "lookup" if calculation else "concept", "goal":state["question"], "steps":[], "requires_calculation":calculation, "requires_chart":chart}
+
 from core.storage import Workspace
-from core.tools import ToolContext
+from core.tools import ToolContext, scatter_plot, correlation_heatmap, histogram
 
 class Model:
     def __init__(self, responses): self.responses, self.calls = iter(responses), []
-    def bind_tools(self, tools): return self
+    def bind_tools(self, tools, **kwargs): return self
     def invoke(self, messages):
         self.calls.append(messages)
         response = next(self.responses)
@@ -37,7 +44,7 @@ class TutorTests(unittest.TestCase):
     def tearDown(self):
         self.workspace.close(); self.tmp.cleanup()
     def run_graph(self, model, question='What relates heart rate and sleep hours?'):
-        return build_graph(model, self.workspace.checkpointer).invoke({'question':question}, self.config, context=self.context)
+        return build_graph(model, self.workspace.checkpointer, planner=test_plan, finalizer=lambda state,payload: dict(zip(("answer","followups"),unpack(model.invoke([SystemMessage(content='Earlier context summaries: ' + json.dumps(payload['earlier_context']))] + prompt_context(state)[0]))))).invoke({'question':question}, self.config, context=self.context)
     def relationship_model(self, final=None):
         return Model([call('calculate_statistics', {'operation':'pearson','columns':['heart_rate_bpm','sleep_hours']},'correlation'),
           call('scatter_plot', {'x':'heart_rate_bpm','y':'sleep_hours'},'scatter'),
@@ -63,11 +70,12 @@ class TutorTests(unittest.TestCase):
         self.assertTrue(any(isinstance(m,ToolMessage) and m.status=='error' for m in state['messages']))
     def test_matrix_heatmap_and_result_reference(self):
         class MatrixModel:
-            def bind_tools(self,t): return self
+            def bind_tools(self,t,**kwargs): return self
             def invoke(self,m):
-                if isinstance(m[-1],HumanMessage):
+                last = next(v for v in reversed(m) if isinstance(v,(HumanMessage,ToolMessage)))
+                if isinstance(last,HumanMessage):
                     return call('calculate_statistics',{'operation':'spearman','columns':['heart_rate_bpm','sleep_hours','age_years']})
-                facts=json.loads(m[-1].content)
+                facts=json.loads(last.content)
                 if 'matrix' in facts: return call('correlation_heatmap',{'source_result_id':facts['result_id']},'heat')
                 return answer('These are pairwise rank correlations; they do not account for the other variables.')
         state=self.run_graph(MatrixModel(),'Compare all three numeric measurements.')
@@ -75,13 +83,14 @@ class TutorTests(unittest.TestCase):
         self.assertEqual(len(state['result']['evidence'][0]['pairs']),3)
     def test_query_table_to_bar_chart(self):
         class QueryModel:
-            def bind_tools(self,t): return self
+            def bind_tools(self,t,**kwargs): return self
             def invoke(self,m):
-                if isinstance(m[-1],HumanMessage): return call('query_data',{'sql':'SELECT "group", avg(age_years) AS mean_age FROM healthcare GROUP BY "group"'})
-                facts=json.loads(m[-1].content)
+                last = next(v for v in reversed(m) if isinstance(v,(HumanMessage,ToolMessage)))
+                if isinstance(last,HumanMessage): return call('query_data',{'sql':'SELECT "group", avg(age_years) AS mean_age FROM healthcare GROUP BY "group"'})
+                facts=json.loads(last.content)
                 if facts['operation']=='query': return call('bar_chart',{'source_result_id':facts['result_id'],'x':'group','y':'mean_age'},'bar')
                 return answer('The bar chart compares the computed mean ages by group.')
-        state=self.run_graph(QueryModel(),'Mean age by group?')
+        state=self.run_graph(QueryModel(),'Show mean age by group in a bar chart.')
         self.assertEqual(state['result']['charts'][0]['type'],'bar')
     def test_filters_missing_and_constant(self):
         result=relationship(pd.DataFrame({'x':[1,1,np.inf],'y':[2,3,4]}),'x','y')
@@ -116,6 +125,7 @@ class TutorTests(unittest.TestCase):
         self.assertIn('pearson_r',prompt)
         self.assertIn('Earlier context summaries',prompt)
         self.assertNotIn('frame',state)
+        self.assertNotIn('result', build_graph(model, self.workspace.checkpointer).get_state(self.config).values)
     def test_results_are_isolated_between_chats(self):
         state=self.run_graph(self.relationship_model())
         key=next(m.artifact['result_id'] for m in state['messages'] if isinstance(m,ToolMessage) and m.status!='error')
@@ -152,5 +162,72 @@ class TutorTests(unittest.TestCase):
         self.assertNotIn('attachment://', result['answer'])
         self.assertNotIn('Follow-up suggestions', result['answer'])
         self.assertEqual(result['followups'], ['What is the age range?'])
+
+    def test_completion_gate_prevents_finishing_relationship_without_chart(self):
+        model = Model([call('calculate_statistics', {'operation': 'pearson', 'columns': ['heart_rate_bpm', 'sleep_hours']}),
+                       answer('The correlation is -1.'),
+                       call('scatter_plot', {'x': 'heart_rate_bpm', 'y': 'sleep_hours'}, 'finish-chart'),
+                       answer('The correlation is -1 using four complete pairs. One record was excluded. This is descriptive association.')])
+        state = self.run_graph(model)
+        self.assertEqual(state['result']['charts'][0]['type'], 'scatter')
+        self.assertFalse(state['completion_missing'])
+        self.assertIn('check_completion', state['trace'])
+        self.assertTrue(any('planned work is incomplete' in str(m.content) for m in model.calls[2]))
+
+    def test_greeting_bypasses_planning_models_and_tools(self):
+        model = Model([])
+        with patch('core.education.make_model', side_effect=AssertionError('A greeting must not call a model')):
+            state = self.run_graph(model, 'Hi!')
+        self.assertEqual(model.calls, [])
+        self.assertEqual(state['model_calls'], 0)
+        self.assertEqual(state['result']['charts'], [])
+        self.assertNotIn('plan_analysis', state['trace'])
+        self.assertNotIn('check_completion', state['trace'])
+        self.assertFalse(state['result']['partial'])
+        self.assertEqual(state['result']['teaching_note'], '')
+
+    def test_greeting_with_a_data_request_does_not_bypass_analysis(self):
+        state = self.run_graph(Model([call('calculate_statistics', {'operation': 'mean', 'columns': ['age_years']}),
+                                      answer('The mean age is 40.')]), 'Hi, what is the average age?')
+        self.assertIn('plan_analysis', state['trace'])
+        self.assertTrue(state['result']['evidence'])
+
+    def test_chart_schemas_expose_only_relevant_inputs(self):
+        self.assertNotIn('bins', scatter_plot.args)
+        self.assertNotIn('x', correlation_heatmap.args)
+        self.assertNotIn('y', histogram.args)
+        self.assertIn('bins', histogram.args)
+
+    def test_filtered_scatter_and_statistics_use_same_subset(self):
+        filters = [{'column': 'age_years', 'op': 'gt', 'value': 30}]
+        model = Model([call('calculate_statistics', {'operation': 'pearson', 'columns': ['heart_rate_bpm', 'sleep_hours'], 'filters': filters}),
+                       call('scatter_plot', {'x': 'heart_rate_bpm', 'y': 'sleep_hours', 'filters': filters}, 'filtered-chart'),
+                       answer('The correlation uses two complete pairs after filtering; one incomplete pair was excluded.')])
+        result = self.run_graph(model, 'Show the relationship between heart rate and sleep hours above age 30.')['result']
+        facts = result['evidence'][0]
+        self.assertEqual(facts['filtered_out'], 2)
+        self.assertEqual(facts['rows_used'], 2)
+        self.assertEqual(facts['rows_excluded'], 1)
+        self.assertEqual(len(result['charts'][0]['points']), 2)
+
+    def test_overview_contract_requires_inspection_even_if_planner_flags_are_false(self):
+        plan = {'intent': 'overview', 'goal': 'Introduce the dataset', 'steps': [], 'requires_calculation': False, 'requires_chart': False}
+        with patch(__name__ + '.test_plan', return_value=plan):
+            result = self.run_graph(Model([call('inspect_dataset', {}), answer('The table contains five records and four columns, with one missing sleep value.')]), 'Help me understand this dataset.')['result']
+        self.assertFalse(result['partial'])
+        self.assertEqual(result['evidence'][0]['operation'], 'overview')
+        self.assertEqual(result['evidence'][0]['category_examples']['group'], ['A', 'B'])
+
+    def test_repeated_overview_reuses_valid_dataset_inspection_before_calling_tools(self):
+        def plan(state):
+            return {'intent': 'overview', 'goal': 'Introduce the dataset', 'steps': ['inspect_dataset'], 'requires_calculation': True, 'requires_chart': False}
+        with patch(__name__ + '.test_plan', side_effect=plan):
+            self.run_graph(Model([call('inspect_dataset', {}), answer('The table contains five records.')]), 'Introduce this dataset.')
+            model = Model([answer('The saved inspection has five records and one missing sleep value.')])
+            state = self.run_graph(model, 'Help me understand this dataset again.')
+        self.assertFalse(state['result']['partial'])
+        self.assertNotIn('tools', state['trace'])
+        self.assertEqual(state['result']['evidence'][0]['rows'], 5)
+        self.assertTrue(state['reused_result_ids'])
 
 if __name__=='__main__': unittest.main()

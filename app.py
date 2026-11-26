@@ -172,7 +172,7 @@ def status():
     from core.models import model_name, provider_name, configured
     return jsonify(model=model_name(), provider=provider_name(), configured=configured(),
                    engine=os.getenv('ANALYSIS_BACKEND', 'education'),
-                   workflow_version='composable-v1', memory_backend='sqlite+private_blob' if os.getenv('HEALTHLENS_STORAGE_URL') else 'sqlite',
+                   workflow_version='planned-composable-v2', memory_backend='sqlite+private_blob' if os.getenv('HEALTHLENS_STORAGE_URL') else 'sqlite',
                    pandasai_installed=importlib.util.find_spec('pandasai') is not None)
 
 
@@ -253,7 +253,7 @@ def chat():
 
     if request.headers.get('Accept') == 'application/x-ndjson':
         import json
-        labels = {'understand_question': 'Understanding your question', 'tutor': 'Choosing the next step', 'tools': 'Calculating or drawing your chart', 'plan_response': 'Checking the data',
+        labels = {'understand_question': 'Understanding your question', 'plan_analysis': 'Planning the analysis', 'check_completion': 'Checking that requested work is complete', 'prepare_answer': 'Preparing your answer from the evidence', 'reply_social': 'Replying', 'tutor': 'Choosing the next step', 'tools': 'Calculating or drawing your chart', 'plan_response': 'Checking the data',
                   'calculate_evidence': 'Explaining what the evidence means', 'explain_findings': 'Preparing your answer',
                   'verify_explanation': 'Checking the explanation against the calculations', 'respond': 'Putting your lesson together'}
 

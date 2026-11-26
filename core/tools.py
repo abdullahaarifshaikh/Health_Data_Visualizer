@@ -80,7 +80,13 @@ def filtered(frame, filters):
 @tool(response_format='content_and_artifact')
 def inspect_dataset(runtime: ToolRuntime[ToolContext]):
     """Inspect column names, data types, record counts, missing cells and numeric summaries. No charts."""
-    return save(runtime, analytics.overview(runtime.context.frame))
+    frame = runtime.context.frame
+    result = analytics.overview(frame)
+    result['facts']['category_examples'] = {str(c): frame[c].dropna().astype(str).unique()[:8].tolist()
+        for c in frame.select_dtypes(exclude='number').columns if frame[c].nunique() <= 30}
+    result['facts']['observation_unit'] = 'Not defined. Do not assume one record per person.'
+    result['facts']['measurement_context'] = 'Only column names and values are supplied. Do not infer resting, nightly averaging, treatment/control groups or study design.'
+    return save(runtime, result)
 
 
 @tool(response_format='content_and_artifact')
@@ -113,7 +119,8 @@ def calculate_statistics(operation: Literal['count', 'sum', 'mean', 'median', 'm
     std/variance use sample denominator n-1. Quantiles are 0,25,50,75,100 percent.
     For charts call a chart tool separately. Does not perform regression, significance or causal tests.
     """
-    frame = filtered(get_frame(runtime, source_result_id), filters)
+    input_frame = get_frame(runtime, source_result_id)
+    frame = filtered(input_frame, filters)
     if not columns or len(columns) > 12 or len(set(columns)) != len(columns) or any(c not in frame for c in columns):
         raise ValueError('Choose 1 to 12 different existing columns.')
     if group_by is not None and group_by not in frame:
@@ -124,6 +131,8 @@ def calculate_statistics(operation: Literal['count', 'sum', 'mean', 'median', 'm
         raise ValueError('No records match these filters.')
     facts = {'operation': 'statistics', 'statistic': operation, 'columns': columns, 'group_by': group_by,
              'filters': filters or [], 'rows_total': len(runtime.context.frame), 'rows_selected': len(frame)}
+    facts.update(dataset_rows=len(runtime.context.frame), input_rows=len(input_frame), filtered_out=len(input_frame) - len(frame),
+                 input_scope='saved result table' if source_result_id else 'original dataset', source_result_id=source_result_id)
     if operation in ('pearson', 'spearman'):
         if len(columns) < 2 or group_by:
             raise ValueError('Correlations need 2+ numeric columns; use filters for group-specific correlations.')
@@ -180,8 +189,8 @@ def calculate_statistics(operation: Literal['count', 'sum', 'mean', 'median', 'm
     return save(runtime, {'facts': facts, 'table': table, 'data': table})
 
 
-def draw(runtime, kind, x=None, y=None, source_result_id=None, group_by=None, bins=8):
-    frame = get_frame(runtime, source_result_id)
+def draw(runtime, kind, x=None, y=None, source_result_id=None, group_by=None, bins=8, filters=None):
+    frame = filtered(get_frame(runtime, source_result_id), filters)
     if kind == 'heatmap':
         if not source_result_id:
             raise ValueError('Calculate correlations first and supply the result_id.')
@@ -234,24 +243,74 @@ def draw(runtime, kind, x=None, y=None, source_result_id=None, group_by=None, bi
     chart = {'type': kind, 'title': f'{analytics.label(y)} by {analytics.label(x)}',
              'x_label': x, 'y_label': y, 'labels': values['label'].tolist(), 'values': values['value'].tolist(),
              'caption': 'Visualization of the selected data or saved calculation result; missing values excluded.'}
+    if source_result_id:
+        context = runtime.context
+        source = context.workspace.artifact(source_result_id, context.dataset_id, context.chat_id)['facts']
+        if source.get('operation') == 'statistics' and y == 'value' and len(source.get('columns', [])) == 1:
+            chart['y_label'] = source['statistic'] + ' ' + analytics.label(source['columns'][0])
+            chart['x_label'] = source.get('group_by') or x
+            chart['title'] = chart['y_label'].capitalize() + ' by ' + analytics.label(chart['x_label'])
     return save(runtime, {'facts': {'operation': 'chart', 'type': kind, 'source_result_id': source_result_id}, 'charts': [chart]})
 
 
-def chart_tool(name, kind, description):
-    @tool(name, response_format='content_and_artifact')
-    def chart(runtime: ToolRuntime[ToolContext], x: str | None = None, y: str | None = None,
-              source_result_id: str | None = None, group_by: str | None = None, bins: int = 8):
-        """Draw a chart from validated dataset columns or a previous result_id; no invented values."""
-        return draw(runtime, kind, x, y, source_result_id, group_by, bins)
-    chart.description = description
-    return chart
+@tool(response_format='content_and_artifact')
+def scatter_plot(x: str, y: str, runtime: ToolRuntime[ToolContext], source_result_id: str | None = None,
+                 group_by: str | None = None, filters: list[dict] | None = None):
+    """Draw numeric x/y as points, optionally grouped by a category (max 12). Use dataset columns
+    or a saved table's source_result_id. Apply the same filters as the statistics. Does not calculate correlation."""
+    return draw(runtime, 'scatter', x, y, source_result_id, group_by, filters=filters)
 
 
-TOOLS = [inspect_dataset, query_data, calculate_statistics,
-    chart_tool('scatter_plot', 'scatter', 'Draw two numeric columns x/y as points. Optional group_by category (max 12). source_result_id optional. No correlation calculation.'),
-    chart_tool('pie_chart', 'pie', 'Show parts of a whole. x alone bins a numeric variable or counts categories. For a saved frequency/query table supply source_result_id, x=labels, y=count/percentage. Never use means as pie slices.'),
-    chart_tool('bar_chart', 'bar', 'Compare categories from a computed table. Specify x labels, numeric y, and optional source_result_id. Calculate group means/counts first.'),
-    chart_tool('line_chart', 'line', 'Plot ordered query results. Specify x, numeric y and source_result_id. Query must order time/sequence first; do not imply a time trend from unordered rows.'),
-    chart_tool('histogram', 'histogram', 'Count a numeric column x into bins (2-20). Optional source_result_id. Use to inspect distribution.'),
-    chart_tool('box_plot', 'box', 'Show five-number summary of numeric x. Full-range whiskers, not Tukey outlier thresholds. Optional source_result_id.'),
-    chart_tool('correlation_heatmap', 'heatmap', 'Visualize an existing Pearson/Spearman correlation matrix. Required source_result_id from calculate_statistics; no new calculation.')]
+@tool(response_format='content_and_artifact')
+def pie_chart(x: str, runtime: ToolRuntime[ToolContext], y: str | None = None,
+              source_result_id: str | None = None, bins: int | None = 8, filters: list[dict] | None = None):
+    """Show parts of a whole. x alone counts categories or bins numeric values. For a computed
+    frequency table supply source_result_id, x=labels, y=count/percentage. Never use means as slices.
+    bins is optional (default 8), used only when x is numeric and y is absent."""
+    return draw(runtime, 'pie', x, y, source_result_id, bins=8 if bins is None else bins, filters=filters)
+
+
+@tool(response_format='content_and_artifact')
+def bar_chart(x: str, y: str, runtime: ToolRuntime[ToolContext], source_result_id: str | None = None,
+              filters: list[dict] | None = None):
+    """Compare category labels x and numeric values y. Calculate group means/counts first;
+    pass that table's result_id as source_result_id. Use columns from that saved table."""
+    return draw(runtime, 'bar', x, y, source_result_id, filters=filters)
+
+
+@tool(response_format='content_and_artifact')
+def line_chart(x: str, y: str, runtime: ToolRuntime[ToolContext], source_result_id: str | None = None,
+               filters: list[dict] | None = None):
+    """Plot ordered x and numeric y rows. Query/order the result first; use its source_result_id.
+    Do not imply a time trend from unordered records."""
+    return draw(runtime, 'line', x, y, source_result_id, filters=filters)
+
+
+@tool(response_format='content_and_artifact')
+def histogram(x: str, runtime: ToolRuntime[ToolContext], bins: int | None = 8,
+              source_result_id: str | None = None, filters: list[dict] | None = None):
+    """Count numeric column x into equal-width bins (2-20; default 8). Optional saved table
+    source_result_id and filters. Use to inspect a numeric distribution."""
+    return draw(runtime, 'histogram', x, source_result_id=source_result_id,
+                bins=8 if bins is None else bins, filters=filters)
+
+
+@tool(response_format='content_and_artifact')
+def box_plot(x: str, runtime: ToolRuntime[ToolContext], source_result_id: str | None = None,
+             filters: list[dict] | None = None):
+    """Draw the five-number summary of numeric x, with full-range whiskers (not Tukey outlier
+    thresholds). Optional saved table source_result_id and filters."""
+    return draw(runtime, 'box', x, source_result_id=source_result_id, filters=filters)
+
+
+@tool(response_format='content_and_artifact')
+def correlation_heatmap(source_result_id: str, runtime: ToolRuntime[ToolContext]):
+    """Visualize an already calculated Pearson/Spearman matrix. Supply the result_id from
+    calculate_statistics. This tool draws the matrix; it does not perform another calculation."""
+    return draw(runtime, 'heatmap', source_result_id=source_result_id)
+
+
+inspect_dataset.metadata = {'cache_scope': 'dataset'}
+
+TOOLS = [inspect_dataset, query_data, calculate_statistics, scatter_plot, pie_chart, bar_chart,
+         line_chart, histogram, box_plot, correlation_heatmap]

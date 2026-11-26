@@ -29,10 +29,10 @@ class StorageTests(unittest.TestCase):
             from core.education import build_graph
             from core.tools import ToolContext
             class Model:
-                def bind_tools(self, tools): return self
+                def bind_tools(self, tools, **kwargs): return self
                 def invoke(self, messages): return AIMessage(content='An educational concept explanation.')
             config = {'configurable': {'thread_id': 'ds:chat'}}
-            build_graph(Model(), source.checkpointer).invoke({'question': 'Remember this topic.'}, config,
+            build_graph(Model(), source.checkpointer, finalizer=lambda state,payload: {"answer":"An educational concept explanation.","followups":[]}, planner=lambda s: {"intent":"concept","goal":s["question"],"steps":[],"requires_calculation":False,"requires_chart":False}).invoke({'question': 'Remember this topic.'}, config,
                                                            context=ToolContext(data['frame'], source, 'ds', 'chat'))
             source.backup()
             restored = BackupWorkspace(owner, root=second, remote='mock')
@@ -50,7 +50,15 @@ class StorageTests(unittest.TestCase):
         sample = client.post('/api/sample').get_json()
         class Model:
             calls = []
-            def bind_tools(self, tools): return self
+            def with_structured_output(self, schema, **kwargs):
+                outer = self
+                class Structured:
+                    def invoke(self, messages):
+                        if schema.__name__ == 'AnalysisPlan':
+                            return {'intent':'concept','goal':'Explain a teaching concept','steps':[],'requires_calculation':False,'requires_chart':False,'chart_tools':[]}
+                        return json.loads(outer.invoke(messages).content)
+                return Structured()
+            def bind_tools(self, tools, **kwargs): return self
             def invoke(self, messages):
                 self.calls.append(messages)
                 return AIMessage(content=json.dumps({'answer': 'We are exploring the classroom dataset.', 'followups': []}))

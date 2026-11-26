@@ -103,6 +103,7 @@ function setBusy(value) {
 function evidenceRows(fact) {
   if (fact.operation === 'relationship') return [
     ['Measurements', `${fact.x} and ${fact.y}`], ['Complete paired records', fact.rows_used],
+    ['Input scope', fact.input_scope || 'Dataset'], ['Records before filtering', fact.input_rows ?? fact.rows_total],
     ['Records excluded', fact.rows_excluded], ['Pearson correlation (r)', fact.pearson_r == null ? 'Undefined' : Number(fact.pearson_r).toFixed(4)],
     ['Significance / causality', 'Not tested']
   ];
