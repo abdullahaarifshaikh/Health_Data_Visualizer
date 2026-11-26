@@ -1,6 +1,6 @@
 # HealthLens: AI architecture and analysis flow
 
-Status: final implementation checks are in progress. The graph described below is implemented; the final hosted acceptance check is pending.
+Status: implemented and deployed. Validated with synthetic data on 26 November 2026.
 
 HealthLens helps users understand tabular healthcare data through explanations and interactive visualizations. Its AI plans the work and combines small tools instead of routing every question through a fixed analysis function.
 
@@ -10,10 +10,10 @@ flowchart TD
     U -->|Yes| S[Direct reply: no AI planning or tools]
     U -->|No| P[AI creates a structured analysis plan]
     P -->|No tool work needed| F[AI prepares the answer]
-    P -->|Data work needed| A[AI selects tools and inputs]
-    A --> T[Execute tools and return verified results]
-    T --> C{Required evidence and charts present?}
-    C -->|No: work remains| A
+    P -->|Data work needed| C{Required evidence and charts present?}
+    C -->|No: work remains| A[AI selects tools and inputs]
+    A --> T[Execute tools and return computed results]
+    T --> C
     C -->|Yes| F
     F --> V[Check explanation against computed evidence]
     V --> R[Return explanation, charts and tailored follow-ups]
@@ -23,7 +23,7 @@ flowchart TD
 ## How a question becomes an answer
 
 1. **Route the request.** Greetings and acknowledgements take a direct path with no model or analysis calls. For other questions, the backend supplies the question, dataset schema and relevant conversation context. The AI sees column names and types; calculation tools access the actual table.
-2. **Create a structured plan.** The AI selects an intent and a list of supported tool steps, including whether calculations and a visualization are needed. Plans cannot contain arbitrary analysis instructions. Dataset overviews require inspection. New relationship analyses require both computed evidence and a supporting chart.
+2. **Create a structured plan.** The planner receives the question, schema and conversation as a task-data object rather than a conversation to continue. It selects an intent and a list of supported tool steps, including whether calculations and a visualization are needed. Plans cannot contain arbitrary analysis instructions. Dataset overviews require inspection. New relationship analyses require both computed evidence and a supporting chart.
 3. **Select and execute tools.** The AI chooses tools using their descriptions and defined input schemas. The backend validates inputs, performs the calculations and returns actual results. Tool calls are managed inside LangGraph through a ToolNode.
 4. **Continue the reasoning loop.** After a tool result, the graph checks required work and returns to AI tool selection only when work remains. For example, it calculates a correlation matrix first, then passes the saved result reference to the heatmap tool. Calculations do not automatically create charts.
 5. **Check task completion.** Before returning a final answer, the graph checks whether required calculations and charts actually completed. If work is missing, it restricts tool selection to the remaining required capabilities. Valid dataset-scoped inspection results can be reused because the dataset is immutable within that chat. Execution limits prevent endless loops; unfinished work must be disclosed.
@@ -65,3 +65,7 @@ Suggested next questions are generated with the answer using the current questio
 The AI workflow uses LangGraph and LangChain, with Groq or Gemini as the model provider. Pandas, NumPy, SciPy and DuckDB calculate results; Apache ECharts renders charts. Flask handles requests, and Vercel hosts the application.
 
 Schema validation and completion checks improve reliability but do not prove every generated sentence correct. The computed evidence remains available for inspection. Tool calls and execution time are bounded, and provider outages or incomplete work are reported rather than presented as a finished analysis.
+
+## Implementation and validation
+
+The active graph is in `core/education.py`; its tool registry is in `core/tools.py`. The greeting route, overview inspection, required-tool completion, tool schemas, evidence context and provider-limit handling are covered by regression tests. Browser checks cover interactive charts, suggestions, chat controls and mobile overflow. Live synthetic-data checks passed for greetings, dataset overviews, relationship scatter plots, grouped bar charts, correlation heatmaps and recall of earlier calculated evidence. Provider quota limits can still delay requests during repeated testing.
