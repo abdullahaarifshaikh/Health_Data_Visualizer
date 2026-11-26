@@ -8,7 +8,7 @@ import pandas as pd
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage
 import app as web
 from core.analytics import relationship, distribution, direct_relationship
-from core.education import build_graph, prompt_context, unpack
+from core.education import build_graph, prompt_context, unpack, planning_messages
 
 def test_plan(state):
     question = state["question"].lower()
@@ -229,5 +229,19 @@ class TutorTests(unittest.TestCase):
         self.assertNotIn('tools', state['trace'])
         self.assertEqual(state['result']['evidence'][0]['rows'], 5)
         self.assertTrue(state['reused_result_ids'])
+
+    def test_planner_receives_conversation_as_task_data_not_a_chat_to_continue(self):
+        question = 'Recall the earlier correlation; do not redo it.'
+        state = {'question': question, 'profile': {'columns': []}, 'messages': [
+            HumanMessage(content='Compare the measurements.'), AIMessage(content='The saved r is -0.096 with 166 pairs.'),
+            HumanMessage(content=question)]}
+        messages = planning_messages(state)
+        self.assertEqual(len(messages), 2)
+        self.assertIsInstance(messages[0], SystemMessage)
+        self.assertIsInstance(messages[1], HumanMessage)
+        payload = json.loads(messages[1].content)
+        self.assertEqual(payload['new_question'], question)
+        self.assertIn('do not answer', payload['task'])
+        self.assertIn('166', json.dumps(payload['earlier_context']))
 
 if __name__=='__main__': unittest.main()

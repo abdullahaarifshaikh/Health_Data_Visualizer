@@ -177,6 +177,16 @@ def prompt_context(state, recent_turns=3):
     return messages, notes
 
 
+def planning_messages(state):
+    recent, notes = prompt_context(state, recent_turns=1)
+    prior = [{'speaker': 'user' if isinstance(m, HumanMessage) else 'assistant', 'text': text_content(m)[:1000]}
+             for m in recent if isinstance(m, HumanMessage) or (isinstance(m, AIMessage) and not m.tool_calls)]
+    payload = {'task': 'Classify and plan the new question; do not answer it.', 'new_question': state['question'],
+               'dataset_schema': state['profile'], 'recent_conversation': prior, 'earlier_context': notes}
+    return [SystemMessage(content=PLAN_PROMPT + '\nThe next message is a task-data object, not a conversation to continue. Return only the analysis-plan schema. When recalling an existing result, use intent=concept, steps=[], requires_calculation=false and requires_chart=false.'),
+            HumanMessage(content=json.dumps(payload, default=str))]
+
+
 def artifacts(state, context, current_only=True):
     found, seen = [], set()
     if current_only:
@@ -274,9 +284,7 @@ def build_graph(model=None, checkpointer=None, planner=None, finalizer=None):
                 if provider_name() == 'groq':
                     kwargs['strict'] = True
                 structured = llm.with_structured_output(AnalysisPlan, **kwargs)
-                messages, _ = prompt_context(state)
-                conversation = [m for m in messages if isinstance(m, HumanMessage) or (isinstance(m, AIMessage) and not m.tool_calls)]
-                plan = provider_invoke(structured, [SystemMessage(content=PLAN_PROMPT + '\nFor an overview/help-understand-dataset request, plan inspection and a plain-language summary, not unsolicited correlations.\nSchema: ' + json.dumps(state['profile']))] + conversation[-4:], state['deadline'])
+                plan = provider_invoke(structured, planning_messages(state), state['deadline'])
             plan = AnalysisPlan.model_validate(plan).model_dump()
             # These are product requirements for analysis intents, not fixed tool recipes.
             if plan['intent'] == 'relationship':
