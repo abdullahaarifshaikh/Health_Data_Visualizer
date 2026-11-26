@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 import app as web
+from langchain_core.messages import HumanMessage
 
 class ChatTests(unittest.TestCase):
     def test_chats_isolate_context_and_clear_keeps_dataset(self):
@@ -9,7 +10,7 @@ class ChatTests(unittest.TestCase):
         original = client.post('/api/sample').get_json()
         first = original['active_chat']
         data = next(iter(web.datasets.values()))
-        data.update(responses=[{'question': 'First question', 'result': {'answer': 'Answer'}, 'trace': []}], history=[{'question': 'First question', 'answer': 'Answer'}], turns=[['context']])
+        data.update(responses=[{'question': 'First question', 'result': {'answer': 'Answer'}, 'trace': []}], history=[{'question': 'First question', 'answer': 'Answer'}], turns=[[HumanMessage(content='context')]])
         fresh = client.post('/api/chats', json={'action': 'new'}).get_json()
         self.assertNotEqual(first, fresh['active_chat'])
         self.assertEqual(fresh['conversation'], [])
@@ -17,7 +18,7 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(len(fresh['chats']), 2)
         restored = client.post('/api/chats', json={'action': 'select', 'id': first}).get_json()
         self.assertEqual(restored['conversation'][0]['question'], 'First question')
-        self.assertEqual(data['turns'], [['context']])
+        self.assertEqual(data['turns'][0][0].content, 'context')
         cleared = client.post('/api/chats', json={'action': 'clear'}).get_json()
         self.assertEqual(cleared['conversation'], [])
         self.assertEqual(cleared['profile']['rows'], 180)

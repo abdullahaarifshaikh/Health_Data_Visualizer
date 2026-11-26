@@ -1,5 +1,6 @@
 import {Sandbox} from '@vercel/sandbox';
 import {Readable} from 'node:stream';
+import {storage} from '../server/storage.mjs';
 
 export const config = {api: {bodyParser: false}};
 const routes = new Set(['status', 'dataset', 'sample', 'upload', 'chat', 'clear', 'chats']);
@@ -25,7 +26,8 @@ async function backend() {
         SESSION_SECRET: process.env.SESSION_SECRET,
         HEALTHLENS_REVISION: process.env.VERCEL_GIT_COMMIT_SHA || 'education-v2',
         ANALYSIS_BACKEND: process.env.ANALYSIS_BACKEND || 'education',
-        HOST: '0.0.0.0', PORT: '5000', PYTHONUTF8: '1'
+        HOST: '0.0.0.0', PORT: '5000', PYTHONUTF8: '1',
+        HEALTHLENS_STORAGE_URL: 'https://' + (process.env.VERCEL_PROJECT_PRODUCTION_URL || 'health-data-visualizer-eight.vercel.app') + '/api/storage'
       }, timeoutMs: 100_000
     });
     if (result.exitCode !== 0) throw new Error('Backend startup failed');
@@ -37,6 +39,7 @@ async function backend() {
 export default async function handler(req, res) {
   const url = new URL(req.url, 'https://healthlens.invalid');
   const route = req.query?.route || url.searchParams.get('route');
+  if (route === 'storage') return storage(req, res, url);
   if (!routes.has(route)) return res.status(404).json({error: 'Unknown endpoint.'});
   if (!['GET', 'POST'].includes(req.method)) return res.status(405).json({error: 'Method not allowed.'});
   // Only same-origin browser writes; do not trust caller-supplied proxy headers.

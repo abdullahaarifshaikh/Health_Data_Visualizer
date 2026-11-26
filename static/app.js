@@ -112,6 +112,8 @@ function evidenceRows(fact) {
   ];
   if (fact.operation === 'overview') return [['Records', fact.rows], ['Variables', fact.column_count], ['Missing cells', fact.missing_cells]];
   if (fact.operation === 'query') return [['Computed result rows', fact.result_rows], ['Preview truncated', fact.preview_truncated ? 'Yes' : 'No']];
+  if (fact.operation === 'statistics') return [['Calculation', fact.statistic], ['Selected columns', (fact.columns || []).join(', ')],
+    ['Records selected', fact.rows_selected], ['Grouping', fact.group_by || 'None'], ['Method', fact.method || 'Descriptive summary']];
   return [['Grouping', fact.category || '—'], ['Calculation', fact.aggregation || '—'], ['Missing measurements excluded', fact.rows_excluded || 0]];
 }
 

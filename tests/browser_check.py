@@ -12,28 +12,26 @@ from playwright.sync_api import sync_playwright
 
 
 class BrowserModel:
-    def bind_tools(self, tools):
-        return self
-
+    def bind_tools(self, tools): return self
     def invoke(self, messages):
-        last = messages[-1]
-        if isinstance(last, ToolMessage):
-            facts = json.loads(last.content)
-            if facts['operation'] == 'relationship':
-                return AIMessage(content=f'**What the data shows**\n\nThe calculated Pearson correlation is **{facts["pearson_r"]:.3f}**, '
-                    f'using **{facts["rows_used"]} complete records**.\n\n**How to read this**\n\nEach point represents a record. '
-                    'The dashed line summarizes the linear pattern; it does not show causation. '
-                    f'We excluded {facts["rows_excluded"]} incomplete records.\n\n'
-                    '<script>window.UNSAFE_MARKDOWN=true</script>')
-            return AIMessage(content='The pie shows the **share of records** in each labeled age range. '
-                             'The ranges are equal-width bins, not clinical categories. Hover over a slice to inspect it.')
-        if isinstance(last, HumanMessage) and 'pie' in last.content.lower():
-            return AIMessage(content='', tool_calls=[{'name': 'explain_distribution', 'args': {'column': 'age_years', 'chart_type': 'pie'}, 'id': 'pie-test'}])
-        return AIMessage(content='In simpler terms, we are checking whether two recorded measurements move together. '
-                         'The previous correlation describes the observed pattern; it does not establish cause.\n\n'
-                         '| Topic | How I will answer it |\n| --- | --- |\n'
-                         '| Relationships between two measurements | ' + 'A long explanation about recorded measurements and calculated associations. ' * 12 + '|\n'
-                         '| Column name | ' + 'very_long_column_name_' * 30 + ' |')
+        question = next(m.content for m in reversed(messages) if isinstance(m, HumanMessage))
+        def call(name,args,id):
+            return AIMessage(content='', tool_calls=[{'name':name,'args':args,'id':id}])
+        current = messages[messages.index(next(m for m in reversed(messages) if isinstance(m, HumanMessage))):]
+        outputs = [json.loads(m.content) for m in current if isinstance(m,ToolMessage)]
+        if 'matrix' in question.lower():
+            if not outputs: return call('calculate_statistics', {'operation':'pearson','columns':['heart_rate_bpm','sleep_hours','age_years']}, 'matrix')
+            if not any(o.get('chart_type')=='heatmap' for o in outputs): return call('correlation_heatmap', {'source_result_id':outputs[0]['result_id']}, 'heatmap')
+            return AIMessage(content=json.dumps({'answer':'This heatmap shows calculated pairwise correlations; it does not adjust for other variables.', 'followups':['How does the age and heart rate correlation compare across groups?']}))
+        if 'pie' in question.lower():
+            if not outputs: return call('pie_chart',{'x':'age_years'},'pie')
+            return AIMessage(content=json.dumps({'answer':'The pie shows the **share of records** in each labeled age range. These are equal-width bins, not clinical categories.', 'followups':['How does age vary between the dataset groups?']}))
+        if 'relationship' in question.lower():
+            if not outputs: return call('calculate_statistics',{'operation':'pearson','columns':['heart_rate_bpm','sleep_hours']},'stats')
+            if not any(o.get('chart_type')=='scatter' for o in outputs): return call('scatter_plot',{'x':'heart_rate_bpm','y':'sleep_hours'},'scatter')
+            facts=outputs[0]
+            return AIMessage(content=json.dumps({'answer':f'**What the data shows**\n\nPearson correlation is **{facts["pearson_r"]:.3f}**, using **{facts["rows_used"]} complete records**. We excluded {facts["rows_excluded"]} records. This does not establish causation. <script>window.UNSAFE_MARKDOWN=true</script>', 'followups':['What does the heart rate correlation mean in plain language?']}))
+        return AIMessage(content=json.dumps({'answer':'The previous correlation describes the observed pattern; it does not establish cause.\n\n| Topic | Explanation |\n| --- | --- |\n| Measurements | '+'A long explanation about recorded measurements. '*12+'|\n| Column | '+'very_long_column_name_'*30+' |', 'followups':['How many sleep hours values are missing?']}))
 
 
 web.graph = build_graph(BrowserModel())
@@ -69,7 +67,7 @@ with sync_playwright() as p:
     assert page.locator('.interactive-chart canvas').count() > 0
     assert not page.evaluate('window.UNSAFE_MARKDOWN === true')
     page.screenshot(path=str(out / 'education-desktop.png'), full_page=True)
-    page.get_by_role('button', name='Explain that more simply.', exact=True).click()
+    page.get_by_role('button', name='What does the heart rate correlation mean in plain language?', exact=True).click()
     page.wait_for_function("document.querySelectorAll('.lesson-text').length === 2")
     assert 'previous correlation' in page.locator('.lesson-text').last.inner_text()
     assert page.locator('.markdown-table').count() == 1
@@ -88,6 +86,10 @@ with sync_playwright() as p:
     page.locator('#new-chat').click()
     page.wait_for_function("document.querySelectorAll('.lesson-text').length === 0")
     assert page.locator('#dataset-name').inner_text() == 'Synthetic classroom data'
+    page.locator('#question').fill('Show a correlation matrix for heart rate, sleep hours and age.')
+    page.locator('#send').click()
+    page.wait_for_function("document.querySelector('.interactive-chart')?.chartInstance != null")
+    assert page.locator('.interactive-chart').evaluate("el => el.chartInstance.getOption().series[0].type") == 'heatmap'
     page.locator('#chat-list button').nth(1).click()
     page.wait_for_function("document.querySelectorAll('.lesson-text').length === 3")
     page.locator('#clear').click()

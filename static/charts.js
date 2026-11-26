@@ -16,7 +16,16 @@ window.HealthLensCharts = {
       toolbox: {right: 10, top: 36, feature: {restore: {}, saveAsImage: {pixelRatio: 2, title: 'Save chart'}}},
       aria: {enabled: true, description: spec.title}
     };
-    if (spec.type === 'pie') {
+    if (spec.type === 'heatmap') {
+      option.tooltip = {position: 'top', renderMode: 'richText'};
+      option.xAxis = {type: 'category', data: spec.labels, axisLabel: {rotate: 25, fontSize: 10, width: 90, overflow: 'truncate'}};
+      option.yAxis = {type: 'category', data: spec.labels, axisLabel: {fontSize: 10, width: 100, overflow: 'truncate'}};
+      option.grid = {left: 115, right: 30, top: 65, bottom: 100};
+      option.visualMap = {min: -1, max: 1, calculable: true, orient: 'horizontal', left: 'center', bottom: 5,
+        inRange: {color: ['#a85656', '#f5f4eb', '#176b59']}};
+      option.series = [{type: 'heatmap', data: spec.points, label: {show: spec.labels.length <= 6,
+        formatter: p => Number(p.value[2]).toFixed(2)}, emphasis: {itemStyle: {borderColor: '#203e3a', borderWidth: 1}}}];
+    } else if (spec.type === 'pie') {
       option.series = [{type: 'pie', radius: ['28%', '60%'], center: ['50%', '55%'],
         data: (spec.labels || []).map((name, i) => ({name, value: spec.values[i]})),
         label: {formatter: '{b}\n{d}%', fontSize: 11}, itemStyle: {borderColor: '#fff', borderWidth: 2}}];
@@ -31,6 +40,11 @@ window.HealthLensCharts = {
         option.legend = {top: 47, data: spec.trend ? ['Records', 'Linear trend'] : ['Records'], textStyle: {fontSize: 10}};
         option.series = [{name: 'Records', type: 'scatter', data: spec.points, symbolSize: 8,
           itemStyle: {opacity: .65}, emphasis: {itemStyle: {opacity: 1}}}];
+        if (spec.groups?.length) {
+          option.legend.data = spec.groups.map(group => group.name);
+          option.series = spec.groups.map(group => ({name: group.name, type: 'scatter', data: group.points,
+            symbolSize: 8, itemStyle: {opacity: .7}}));
+        }
         if (spec.trend) option.series.push({name: 'Linear trend', type: 'line', data: spec.trend,
           showSymbol: false, lineStyle: {color: '#c29a57', type: 'dashed', width: 2}});
         option.dataZoom = [{type: 'inside'}, {type: 'slider', bottom: 9, height: 15}];

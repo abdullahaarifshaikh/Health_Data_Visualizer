@@ -113,7 +113,7 @@ class AppTests(unittest.TestCase):
             response = self.client.post('/api/chat', json={'question': 'Average age?'})
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()['result']['partial'])
-        self.assertIn('couldn’t reach the tutor', response.get_json()['result']['answer'])
+        self.assertIn('saved chat', response.get_json()['result']['answer'])
 
     def test_chat_uses_graph_and_tracks_followup(self):
         backend = Backend()

@@ -16,12 +16,17 @@ os.environ.setdefault('MPLBACKEND', 'Agg')
 os.environ.setdefault('LITELLM_LOCAL_MODEL_COST_MAP', 'True')
 os.environ.setdefault('TIKTOKEN_CACHE_DIR', str(Path(__file__).parent / '.cache' / 'tiktoken'))
 from core.workflow import graph, profile_frame
+from core.education import build_graph
+from core.tools import ToolContext
+from core.storage import Workspace, session_secret
+DEFAULT_GRAPH = graph
 
 app = Flask(__name__, static_folder='static', static_url_path='/static')
-app.secret_key = os.getenv('SESSION_SECRET') or secrets.token_bytes(32)
+app.secret_key = session_secret()
 app.config.update(MAX_CONTENT_LENGTH=10 * 1024 * 1024, SESSION_COOKIE_HTTPONLY=True,
                   SESSION_COOKIE_SAMESITE='Strict', SESSION_COOKIE_SECURE=bool(os.getenv('APP_PROXY_SECRET')))
 datasets = {}
+workspaces = {}
 store_lock = threading.Lock()
 TTL = 7200
 
@@ -45,18 +50,40 @@ def local_requests():
 def owner():
     if 'owner' not in session:
         session['owner'] = secrets.token_urlsafe(24)
+        session.permanent = True
     return session['owner']
 
 
-def get_dataset():
+def workspace():
+    key = owner()
     with store_lock:
-        now = time.time()
-        for key in list(datasets):
-            if now - datasets[key]['updated'] > TTL:
-                del datasets[key]
-        data = datasets.get(session.get('dataset'))
+        if key not in workspaces:
+            workspaces[key] = Workspace(key)
+        return workspaces[key]
+
+
+def persist(data):
+    # Save app history and native LangGraph checkpoints in the same workspace DB.
+    data['chats'][data['active_chat']] = {k: data[k] for k in ('responses', 'history', 'turns')}
+    repository = workspace()
+    repository.save_dataset(session['dataset'], data)
+    repository.backup()
+
+
+def get_dataset():
+    key = session.get('dataset')
+    if not key:
+        return None
+    repository = workspace()
+    with store_lock:
+        data = datasets.get(key)
+        if data is None:
+            data = repository.load_dataset(key)
+            if data:
+                data.update(updated=time.time(), lock=threading.Lock())
+                datasets[key] = data
         if data and data['owner'] == owner():
-            data['updated'] = now
+            data['updated'] = time.time()
             return data
     return None
 
@@ -77,7 +104,9 @@ def save_dataset(frame, name):
         datasets[token] = {'frame': frame, 'name': name, 'history': [], 'turns': [], 'responses': [], 'owner': owner(),
                            'updated': time.time(), 'lock': threading.Lock()}
     session['dataset'] = token
-    return dataset_payload(datasets[token])
+    payload = dataset_payload(datasets[token])
+    persist(datasets[token])
+    return payload
 
 
 def dataset_payload(data):
@@ -117,16 +146,17 @@ def manage_chats():
             data['active_chat'] = key
             data.update(data['chats'][key])
         elif action == 'clear':
+            workspace().clear_chat(session['dataset'], data['active_chat'])
             data.update(responses=[], history=[], turns=[])
         elif action == 'new':
             if data['responses']:
                 data['active_chat'] = secrets.token_urlsafe(12)
                 data.update(responses=[], history=[], turns=[])
-                if len(data['chats']) >= 20:
-                    del data['chats'][next(iter(data['chats']))]
         else:
             return jsonify(error='Unknown chat action.'), 400
-        return jsonify(dataset_payload(data))
+        payload = dataset_payload(data)
+        persist(data)
+        return jsonify(payload)
     finally:
         data['lock'].release()
 
@@ -142,6 +172,7 @@ def status():
     from core.models import model_name, provider_name, configured
     return jsonify(model=model_name(), provider=provider_name(), configured=configured(),
                    engine=os.getenv('ANALYSIS_BACKEND', 'education'),
+                   workflow_version='composable-v1', memory_backend='sqlite+private_blob' if os.getenv('HEALTHLENS_STORAGE_URL') else 'sqlite',
                    pandasai_installed=importlib.util.find_spec('pandasai') is not None)
 
 
@@ -202,19 +233,27 @@ def chat():
         return jsonify(error='Enter a question between 1 and 4,000 characters.'), 400
     if not data['lock'].acquire(blocking=False):
         return jsonify(error='An analysis is already running for this dataset.'), 409
-    previous = [message for turn in data['turns'][-4:] for message in turn]
-    inputs = {'frame': data['frame'], 'question': question, 'history': data['history'], 'messages': previous}
+    repository = workspace()
+    use_checkpoints = graph is DEFAULT_GRAPH and os.getenv('ANALYSIS_BACKEND', 'education') != 'pandasai'
+    active_graph = build_graph(checkpointer=repository.checkpointer) if use_checkpoints else graph
+    previous = [] if use_checkpoints else [message for turn in data['turns'] for message in turn]
+    inputs = {'question': question, 'dataset_id': session['dataset']}
+    if not use_checkpoints:
+        inputs.update(frame=data['frame'], history=data['history'], messages=previous)
+    context = ToolContext(data['frame'], repository, session['dataset'], data['active_chat'])
+    config = {'configurable': {'thread_id': session['dataset'] + ':' + data['active_chat']}, 'recursion_limit': 24}
 
     def remember(state):
         result = state['result']
-        data['responses'] = (data['responses'] + [{'question': question, 'result': result, 'trace': state.get('trace', [])}])[-4:]
-        data['history'] = (data['history'] + [{'question': question, 'answer': result.get('answer', '')}])[-4:]
-        if state.get('messages'):
-            data['turns'] = (data['turns'] + [state['messages'][len(previous):]])[-4:]
+        data['responses'] = data['responses'] + [{'question': question, 'result': result, 'trace': state.get('trace', [])}]
+        data['history'] = data['history'] + [{'question': question, 'answer': result.get('answer', '')}]
+        if state.get('messages') and not use_checkpoints:
+            data['turns'] = data['turns'] + [state['messages'][len(previous):]]
+        persist(data)
 
     if request.headers.get('Accept') == 'application/x-ndjson':
         import json
-        labels = {'understand_question': 'Understanding your question', 'plan_response': 'Checking the data',
+        labels = {'understand_question': 'Understanding your question', 'tutor': 'Choosing the next step', 'tools': 'Calculating or drawing your chart', 'plan_response': 'Checking the data',
                   'calculate_evidence': 'Explaining what the evidence means', 'explain_findings': 'Preparing your answer',
                   'verify_explanation': 'Checking the explanation against the calculations', 'respond': 'Putting your lesson together'}
 
@@ -224,7 +263,7 @@ def chat():
                 yield json.dumps({'type': 'progress', 'message': 'Reading your question'}) + '\n'
                 last_step = None
                 state = None
-                for state in graph.stream(inputs, stream_mode='values'):
+                for state in active_graph.stream(inputs, config=config, context=context, stream_mode='values'):
                     trace = state.get('trace', [])
                     step = trace[-1] if trace else None
                     if step and step != last_step:
@@ -243,7 +282,7 @@ def chat():
         return Response(events(), content_type='application/x-ndjson', headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
 
     try:
-        state = graph.invoke(inputs)
+        state = active_graph.invoke(inputs, config=config, context=context)
         if state.get('error'):
             return jsonify(error=state['error'], trace=state['trace']), 422
         result = state['result']
@@ -255,6 +294,15 @@ def chat():
 
 @app.post('/api/clear')
 def clear():
+    data = get_dataset()
+    if data:
+        if not data['lock'].acquire(blocking=False):
+            return jsonify(error='Wait for the current answer before removing the dataset.'), 409
+        try:
+            workspace().delete_dataset(session['dataset'], data['chats'])
+            workspace().backup()
+        finally:
+            data['lock'].release()
     with store_lock:
         datasets.pop(session.get('dataset'), None)
     session.pop('dataset', None)

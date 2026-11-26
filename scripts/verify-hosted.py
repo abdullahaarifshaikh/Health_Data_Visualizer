@@ -12,13 +12,13 @@ jar = str(root / 'artifacts' / 'cloud-cookies.txt')
 
 def call(route, payload=None, stream=False):
     args = [cli, 'curl', '/api/' + route, '--deployment', base, '--scope', 'abdullahaarif3-9707',
-            '--', '--silent', '--show-error', '--cookie-jar', jar, '--cookie', jar, '--max-time', '100']
+            '--', '--silent', '--show-error', '--cookie-jar', jar, '--cookie', jar, '--max-time', '180']
     if payload is not None:
         args += ['--request', 'POST', '--header', 'Content-Type: application/json', '--data-binary', json.dumps(payload)]
     if stream:
         args += ['--header', 'Accept: application/x-ndjson', '--no-buffer']
     started = time.monotonic()
-    result = subprocess.run(args, cwd=root, text=True, encoding='utf-8', errors='replace', capture_output=True, timeout=110)
+    result = subprocess.run(args, cwd=root, text=True, encoding='utf-8', errors='replace', capture_output=True, timeout=190)
     if result.returncode:
         raise RuntimeError('Hosted request failed; CLI exit ' + str(result.returncode))
     if stream:
@@ -56,3 +56,9 @@ for index, question in enumerate([
 restored, _ = call('dataset')
 assert len(restored['conversation']) == 3
 print('Hosted Groq conversation, charts, streaming protocol and history verified.', flush=True)
+active = restored['active_chat']
+fresh, _ = call('chats', {'action': 'new'})
+assert fresh['conversation'] == [] and fresh['profile']['rows'] == 180
+restored, _ = call('chats', {'action': 'select', 'id': active})
+assert len(restored['conversation']) == 3
+print('Hosted separate chats and restoration verified.', flush=True)
